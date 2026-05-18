@@ -1,0 +1,38 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local environment files
+.env
+.env.*
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local image-processing inputs and outputs
+input.jpg
+input.jpeg
+watermark.png
+watermarked.jpg
+watermarked.jpeg
+extracted_watermark.png
+
+# Generated experiment outputs
+outputs/
+results/
