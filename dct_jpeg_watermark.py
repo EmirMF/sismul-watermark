@@ -14,6 +14,7 @@ Only numpy and OpenCV are used.
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
 from typing import Tuple
 
@@ -21,12 +22,22 @@ import cv2
 import numpy as np
 
 
+HOST_IMAGE_PATH = "input.jpg"
+WATERMARK_IMAGE_PATH = "watermark.png"
+WATERMARKED_IMAGE_PATH = "watermarked.jpg"
+EXTRACTED_WATERMARK_PATH = "extracted_watermark.png"
+
+DEFAULT_EMBEDDING_QF = 90
+DEFAULT_ATTACK_QF = 80
+DEFAULT_COEFFICIENT = (4, 4)
+
+
 @dataclass(frozen=True)
 class WatermarkConfig:
     """Configuration for DCT-domain binary image watermarking."""
 
     quality_factor: int = 90
-    coefficient: Tuple[int, int] = (4, 4)
+    coefficient: Tuple[int, int] = DEFAULT_COEFFICIENT
     use_y_channel: bool = True
 
 
@@ -367,45 +378,260 @@ class DCTJPEGWatermarker:
 
         return extracted
 
+    def recompress_file(
+        self, input_path: str, output_path: str, attack_qf: int
+    ) -> np.ndarray:
+        """
+        Recompress an existing watermarked image with a chosen JPEG attack QF.
 
-if __name__ == "__main__":
-    # Example usage:
-    #
-    # 1. Put a host image at "input.jpg".
-    # 2. Put a black-white watermark image at "watermark.png".
-    # 3. Set watermark_shape to the watermark image size, e.g. (32, 32).
-    # 4. Run: python dct_jpeg_watermark.py
-    #
-    # Extraction is blind: after embedding, only watermarked.jpg and the watermark
-    # shape are needed. The original input.jpg is not used by extract_file().
-    watermarker = DCTJPEGWatermarker(
+        This is separate from embed_file() so embedding and compression testing
+        can be called independently during manual demos.
+        """
+        image = cv2.imread(input_path, cv2.IMREAD_COLOR)
+        if image is None:
+            raise FileNotFoundError(f"Could not read image to recompress: {input_path}")
+
+        recompressed = self.jpeg_recompress_image(image, attack_qf)
+        if not cv2.imwrite(
+            output_path,
+            recompressed,
+            [cv2.IMWRITE_JPEG_QUALITY, attack_qf],
+        ):
+            raise IOError(f"Could not write recompressed image: {output_path}")
+
+        return recompressed
+
+    @staticmethod
+    def jpeg_recompress_image(image: np.ndarray, quality_factor: int) -> np.ndarray:
+        """
+        Simulate an external JPEG recompression attack.
+
+        This QF is intentionally separate from the embedding QF. To demonstrate
+        watermark failure, embed once at a stable QF, then recompress the saved
+        watermarked image using lower and lower attack QF values.
+        """
+        if not 1 <= quality_factor <= 100:
+            raise ValueError("attack quality_factor must be in the range 1..100.")
+
+        ok, encoded = cv2.imencode(
+            ".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, quality_factor]
+        )
+        if not ok:
+            raise IOError("Could not encode image during JPEG recompression attack.")
+
+        attacked = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+        if attacked is None:
+            raise IOError("Could not decode image during JPEG recompression attack.")
+
+        return attacked
+
+    @staticmethod
+    def binary_watermark_accuracy(
+        reference_watermark: np.ndarray, extracted_watermark: np.ndarray
+    ) -> float:
+        """Return pixel accuracy between the original binary watermark and extraction."""
+        reference = DCTJPEGWatermarker._prepare_binary_watermark(reference_watermark) * 255
+        extracted = DCTJPEGWatermarker._prepare_binary_watermark(extracted_watermark) * 255
+
+        if reference.shape != extracted.shape:
+            raise ValueError(
+                f"Watermark shapes differ: {reference.shape} vs {extracted.shape}."
+            )
+
+        return float(np.mean(reference == extracted))
+
+    def sweep_recompression_quality(
+        self,
+        watermarked_image: np.ndarray,
+        reference_watermark: np.ndarray,
+        min_attack_qf: int = 1,
+        max_attack_qf: int = 100,
+        failure_threshold: float = 0.75,
+    ) -> list[tuple[int, float]]:
+        """
+        Test extraction after JPEG recompression attacks across QF values.
+
+        Returns a list of (attack_qf, extraction_accuracy). A lower accuracy means
+        more watermark bits changed. The first QF with accuracy below
+        failure_threshold can be reported as the point where extraction fails.
+        """
+        if not 1 <= min_attack_qf <= max_attack_qf <= 100:
+            raise ValueError("Attack QF range must satisfy 1 <= min <= max <= 100.")
+
+        binary_reference = self._prepare_binary_watermark(reference_watermark) * 255
+        results: list[tuple[int, float]] = []
+
+        for attack_qf in range(max_attack_qf, min_attack_qf - 1, -1):
+            attacked = self.jpeg_recompress_image(watermarked_image, attack_qf)
+            extracted = self.extract_binary_watermark(attacked, binary_reference.shape)
+            accuracy = self.binary_watermark_accuracy(binary_reference, extracted)
+            results.append((attack_qf, accuracy))
+
+        return results
+
+
+def create_watermarker(embedding_qf: int) -> DCTJPEGWatermarker:
+    """Create a watermarker configured with the embedding/extraction QF."""
+    return DCTJPEGWatermarker(
         WatermarkConfig(
-            quality_factor=71,
-            coefficient=(4, 4),
+            quality_factor=embedding_qf,
+            coefficient=DEFAULT_COEFFICIENT,
             use_y_channel=True,
         )
     )
 
-    host_image_path = "input.jpg"
-    watermark_image_path = "watermark.png"
-    watermarked_image_path = "watermarked.jpg"
-    extracted_watermark_path = "extracted_watermark.png"
+
+def load_watermark_for_shape(watermark_image_path: str) -> np.ndarray:
+    """Load the original watermark only to get shape and measure accuracy."""
+    watermark = cv2.imread(watermark_image_path, cv2.IMREAD_GRAYSCALE)
+    if watermark is None:
+        raise FileNotFoundError(f"Could not read watermark image: {watermark_image_path}")
+    return watermark
+
+
+def attacked_output_paths(attack_qf: int) -> tuple[str, str]:
+    """Return filenames for a manually chosen recompression attack QF."""
+    return (
+        f"watermarked_attack_qf{attack_qf}.jpg",
+        f"extracted_watermark_attack_qf{attack_qf}.png",
+    )
+
+
+def run_embed_watermark(
+    host_image_path: str = HOST_IMAGE_PATH,
+    watermark_image_path: str = WATERMARK_IMAGE_PATH,
+    watermarked_image_path: str = WATERMARKED_IMAGE_PATH,
+    embedding_qf: int = DEFAULT_EMBEDDING_QF,
+) -> None:
+    """Create only the watermarked image from input.jpg and watermark.png."""
+    watermarker = create_watermarker(embedding_qf)
+    watermarker.embed_file(host_image_path, watermark_image_path, watermarked_image_path)
+
+    print("Embedding finished.")
+    print(f"Embedding QF: {embedding_qf}")
+    print(f"Watermarked image saved to: {watermarked_image_path}")
+
+
+def run_compress_attack(
+    watermarked_image_path: str = WATERMARKED_IMAGE_PATH,
+    watermark_image_path: str = WATERMARK_IMAGE_PATH,
+    embedding_qf: int = DEFAULT_EMBEDDING_QF,
+    attack_qf: int = DEFAULT_ATTACK_QF,
+) -> None:
+    """Recompress watermarked.jpg at one attack QF, then extract the watermark."""
+    watermarker = create_watermarker(embedding_qf)
+    watermark = load_watermark_for_shape(watermark_image_path)
+    attacked_watermarked_path, attacked_extracted_watermark_path = (
+        attacked_output_paths(attack_qf)
+    )
+
+    attacked = watermarker.recompress_file(
+        watermarked_image_path, attacked_watermarked_path, attack_qf
+    )
+    attacked_extracted = watermarker.extract_binary_watermark(attacked, watermark.shape)
+    accuracy = watermarker.binary_watermark_accuracy(watermark, attacked_extracted)
+
+    if not cv2.imwrite(attacked_extracted_watermark_path, attacked_extracted):
+        raise IOError(
+            f"Could not write attacked extracted watermark: "
+            f"{attacked_extracted_watermark_path}"
+        )
+
+    print("Compression attack finished.")
+    print(f"Embedding QF used by extractor: {embedding_qf}")
+    print(f"Attack QF: {attack_qf}")
+    print(f"Extraction accuracy: {accuracy:.4f}")
+    print(f"Attacked watermarked image saved to: {attacked_watermarked_path}")
+    print(f"Attacked extracted watermark saved to: {attacked_extracted_watermark_path}")
+
+
+def run_extract_watermark(
+    watermarked_image_path: str = WATERMARKED_IMAGE_PATH,
+    watermark_image_path: str = WATERMARK_IMAGE_PATH,
+    extracted_watermark_path: str = EXTRACTED_WATERMARK_PATH,
+    embedding_qf: int = DEFAULT_EMBEDDING_QF,
+) -> None:
+    """Run only blind extraction from an existing watermarked image."""
+    watermarker = create_watermarker(embedding_qf)
+    watermark = load_watermark_for_shape(watermark_image_path)
+
+    extracted = watermarker.extract_file(
+        watermarked_image_path,
+        watermark_shape=watermark.shape,
+        output_path=extracted_watermark_path,
+    )
+    accuracy = watermarker.binary_watermark_accuracy(watermark, extracted)
+
+    print("Extraction finished.")
+    print(f"Embedding QF used by extractor: {embedding_qf}")
+    print(f"Extracted watermark saved to: {extracted_watermark_path}")
+    print(f"Extraction accuracy: {accuracy:.4f}")
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line mode and file/QF options."""
+    parser = argparse.ArgumentParser(
+        description="Blind binary watermarking using DCT parity/QIM."
+    )
+    subparsers = parser.add_subparsers(dest="mode", required=True)
+
+    embed_parser = subparsers.add_parser(
+        "embed", help="embed watermark.png into input.jpg"
+    )
+    embed_parser.add_argument("--host", default=HOST_IMAGE_PATH)
+    embed_parser.add_argument("--watermark", default=WATERMARK_IMAGE_PATH)
+    embed_parser.add_argument("--output", default=WATERMARKED_IMAGE_PATH)
+    embed_parser.add_argument("--embedding-qf", type=int, default=DEFAULT_EMBEDDING_QF)
+
+    extract_parser = subparsers.add_parser(
+        "extract", help="extract watermark from an existing watermarked image"
+    )
+    extract_parser.add_argument("--watermarked", default=WATERMARKED_IMAGE_PATH)
+    extract_parser.add_argument("--watermark", default=WATERMARK_IMAGE_PATH)
+    extract_parser.add_argument("--output", default=EXTRACTED_WATERMARK_PATH)
+    extract_parser.add_argument("--embedding-qf", type=int, default=DEFAULT_EMBEDDING_QF)
+
+    compress_parser = subparsers.add_parser(
+        "compress", help="recompress watermarked image at one attack QF and extract"
+    )
+    compress_parser.add_argument("--watermarked", default=WATERMARKED_IMAGE_PATH)
+    compress_parser.add_argument("--watermark", default=WATERMARK_IMAGE_PATH)
+    compress_parser.add_argument("--embedding-qf", type=int, default=DEFAULT_EMBEDDING_QF)
+    compress_parser.add_argument("--attack-qf", type=int, default=DEFAULT_ATTACK_QF)
+
+    return parser.parse_args()
+
+
+def main() -> None:
+    """Dispatch the selected command-line mode."""
+    args = parse_args()
 
     try:
-        watermark_for_shape = cv2.imread(watermark_image_path, cv2.IMREAD_GRAYSCALE)
-        if watermark_for_shape is None:
-            raise FileNotFoundError(f"Could not read watermark image: {watermark_image_path}")
-
-        watermarker.embed_file(
-            host_image_path, watermark_image_path, watermarked_image_path
-        )
-        watermarker.extract_file(
-            watermarked_image_path,
-            watermark_shape=watermark_for_shape.shape,
-            output_path=extracted_watermark_path,
-        )
-        print(f"Watermarked image saved to: {watermarked_image_path}")
-        print(f"Extracted watermark saved to: {extracted_watermark_path}")
+        if args.mode == "embed":
+            run_embed_watermark(
+                host_image_path=args.host,
+                watermark_image_path=args.watermark,
+                watermarked_image_path=args.output,
+                embedding_qf=args.embedding_qf,
+            )
+        elif args.mode == "extract":
+            run_extract_watermark(
+                watermarked_image_path=args.watermarked,
+                watermark_image_path=args.watermark,
+                extracted_watermark_path=args.output,
+                embedding_qf=args.embedding_qf,
+            )
+        elif args.mode == "compress":
+            run_compress_attack(
+                watermarked_image_path=args.watermarked,
+                watermark_image_path=args.watermark,
+                embedding_qf=args.embedding_qf,
+                attack_qf=args.attack_qf,
+            )
     except FileNotFoundError as exc:
         print(exc)
         print("Place input.jpg and watermark.png in this folder, then run again.")
+
+
+if __name__ == "__main__":
+    main()
