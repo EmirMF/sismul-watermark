@@ -32,6 +32,9 @@ watermark.png
 watermarked.jpg
 watermarked.jpeg
 extracted_watermark.png
+watermarked_recompress_qf*.jpg
+watermarked_recompress_qf*.jpeg
+extracted_watermark_recompress_qf*.png
 
 # Generated experiment outputs
 outputs/

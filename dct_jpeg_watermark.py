@@ -28,7 +28,7 @@ WATERMARKED_IMAGE_PATH = "watermarked.jpg"
 EXTRACTED_WATERMARK_PATH = "extracted_watermark.png"
 
 DEFAULT_EMBEDDING_QF = 90
-DEFAULT_ATTACK_QF = 80
+DEFAULT_RECOMPRESS_QF = 30
 DEFAULT_COEFFICIENT = (4, 4)
 
 
@@ -379,10 +379,10 @@ class DCTJPEGWatermarker:
         return extracted
 
     def recompress_file(
-        self, input_path: str, output_path: str, attack_qf: int
+        self, input_path: str, output_path: str, recompress_qf: int
     ) -> np.ndarray:
         """
-        Recompress an existing watermarked image with a chosen JPEG attack QF.
+        Recompress an existing watermarked image with a chosen JPEG recompress QF.
 
         This is separate from embed_file() so embedding and compression testing
         can be called independently during manual demos.
@@ -391,11 +391,11 @@ class DCTJPEGWatermarker:
         if image is None:
             raise FileNotFoundError(f"Could not read image to recompress: {input_path}")
 
-        recompressed = self.jpeg_recompress_image(image, attack_qf)
+        recompressed = self.jpeg_recompress_image(image, recompress_qf)
         if not cv2.imwrite(
             output_path,
             recompressed,
-            [cv2.IMWRITE_JPEG_QUALITY, attack_qf],
+            [cv2.IMWRITE_JPEG_QUALITY, recompress_qf],
         ):
             raise IOError(f"Could not write recompressed image: {output_path}")
 
@@ -404,26 +404,26 @@ class DCTJPEGWatermarker:
     @staticmethod
     def jpeg_recompress_image(image: np.ndarray, quality_factor: int) -> np.ndarray:
         """
-        Simulate an external JPEG recompression attack.
+        Simulate external JPEG recompression.
 
         This QF is intentionally separate from the embedding QF. To demonstrate
         watermark failure, embed once at a stable QF, then recompress the saved
-        watermarked image using lower and lower attack QF values.
+        watermarked image using lower and lower recompress QF values.
         """
         if not 1 <= quality_factor <= 100:
-            raise ValueError("attack quality_factor must be in the range 1..100.")
+            raise ValueError("recompress quality_factor must be in the range 1..100.")
 
         ok, encoded = cv2.imencode(
             ".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, quality_factor]
         )
         if not ok:
-            raise IOError("Could not encode image during JPEG recompression attack.")
+            raise IOError("Could not encode image during JPEG recompression.")
 
-        attacked = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
-        if attacked is None:
-            raise IOError("Could not decode image during JPEG recompression attack.")
+        recompressed = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+        if recompressed is None:
+            raise IOError("Could not decode image during JPEG recompression.")
 
-        return attacked
+        return recompressed
 
     @staticmethod
     def binary_watermark_accuracy(
@@ -444,28 +444,28 @@ class DCTJPEGWatermarker:
         self,
         watermarked_image: np.ndarray,
         reference_watermark: np.ndarray,
-        min_attack_qf: int = 1,
-        max_attack_qf: int = 100,
+        min_recompress_qf: int = 1,
+        max_recompress_qf: int = 100,
         failure_threshold: float = 0.75,
     ) -> list[tuple[int, float]]:
         """
-        Test extraction after JPEG recompression attacks across QF values.
+        Test extraction after JPEG recompression across QF values.
 
-        Returns a list of (attack_qf, extraction_accuracy). A lower accuracy means
+        Returns a list of (recompress_qf, extraction_accuracy). A lower accuracy means
         more watermark bits changed. The first QF with accuracy below
         failure_threshold can be reported as the point where extraction fails.
         """
-        if not 1 <= min_attack_qf <= max_attack_qf <= 100:
-            raise ValueError("Attack QF range must satisfy 1 <= min <= max <= 100.")
+        if not 1 <= min_recompress_qf <= max_recompress_qf <= 100:
+            raise ValueError("Recompress QF range must satisfy 1 <= min <= max <= 100.")
 
         binary_reference = self._prepare_binary_watermark(reference_watermark) * 255
         results: list[tuple[int, float]] = []
 
-        for attack_qf in range(max_attack_qf, min_attack_qf - 1, -1):
-            attacked = self.jpeg_recompress_image(watermarked_image, attack_qf)
-            extracted = self.extract_binary_watermark(attacked, binary_reference.shape)
+        for recompress_qf in range(max_recompress_qf, min_recompress_qf - 1, -1):
+            recompressed = self.jpeg_recompress_image(watermarked_image, recompress_qf)
+            extracted = self.extract_binary_watermark(recompressed, binary_reference.shape)
             accuracy = self.binary_watermark_accuracy(binary_reference, extracted)
-            results.append((attack_qf, accuracy))
+            results.append((recompress_qf, accuracy))
 
         return results
 
@@ -489,11 +489,11 @@ def load_watermark_for_shape(watermark_image_path: str) -> np.ndarray:
     return watermark
 
 
-def attacked_output_paths(attack_qf: int) -> tuple[str, str]:
-    """Return filenames for a manually chosen recompression attack QF."""
+def recompressed_output_paths(recompress_qf: int) -> tuple[str, str]:
+    """Return filenames for a manually chosen recompression QF."""
     return (
-        f"watermarked_attack_qf{attack_qf}.jpg",
-        f"extracted_watermark_attack_qf{attack_qf}.png",
+        f"watermarked_recompress_qf{recompress_qf}.jpg",
+        f"extracted_watermark_recompress_qf{recompress_qf}.png",
     )
 
 
@@ -512,37 +512,42 @@ def run_embed_watermark(
     print(f"Watermarked image saved to: {watermarked_image_path}")
 
 
-def run_compress_attack(
+def run_compress_recompression(
     watermarked_image_path: str = WATERMARKED_IMAGE_PATH,
     watermark_image_path: str = WATERMARK_IMAGE_PATH,
     embedding_qf: int = DEFAULT_EMBEDDING_QF,
-    attack_qf: int = DEFAULT_ATTACK_QF,
+    recompress_qf: int = DEFAULT_RECOMPRESS_QF,
 ) -> None:
-    """Recompress watermarked.jpg at one attack QF, then extract the watermark."""
+    """Recompress watermarked.jpg at one recompress QF, then extract the watermark."""
     watermarker = create_watermarker(embedding_qf)
     watermark = load_watermark_for_shape(watermark_image_path)
-    attacked_watermarked_path, attacked_extracted_watermark_path = (
-        attacked_output_paths(attack_qf)
+    recompressed_watermarked_path, recompressed_extracted_watermark_path = (
+        recompressed_output_paths(recompress_qf)
     )
 
-    attacked = watermarker.recompress_file(
-        watermarked_image_path, attacked_watermarked_path, attack_qf
+    recompressed = watermarker.recompress_file(
+        watermarked_image_path, recompressed_watermarked_path, recompress_qf
     )
-    attacked_extracted = watermarker.extract_binary_watermark(attacked, watermark.shape)
-    accuracy = watermarker.binary_watermark_accuracy(watermark, attacked_extracted)
+    recompressed_extracted = watermarker.extract_binary_watermark(
+        recompressed, watermark.shape
+    )
+    accuracy = watermarker.binary_watermark_accuracy(watermark, recompressed_extracted)
 
-    if not cv2.imwrite(attacked_extracted_watermark_path, attacked_extracted):
+    if not cv2.imwrite(recompressed_extracted_watermark_path, recompressed_extracted):
         raise IOError(
-            f"Could not write attacked extracted watermark: "
-            f"{attacked_extracted_watermark_path}"
+            f"Could not write recompressed extracted watermark: "
+            f"{recompressed_extracted_watermark_path}"
         )
 
-    print("Compression attack finished.")
+    print("Recompression finished.")
     print(f"Embedding QF used by extractor: {embedding_qf}")
-    print(f"Attack QF: {attack_qf}")
+    print(f"Recompress QF: {recompress_qf}")
     print(f"Extraction accuracy: {accuracy:.4f}")
-    print(f"Attacked watermarked image saved to: {attacked_watermarked_path}")
-    print(f"Attacked extracted watermark saved to: {attacked_extracted_watermark_path}")
+    print(f"Recompressed watermarked image saved to: {recompressed_watermarked_path}")
+    print(
+        "Recompressed extracted watermark saved to: "
+        f"{recompressed_extracted_watermark_path}"
+    )
 
 
 def run_extract_watermark(
@@ -592,12 +597,14 @@ def parse_args() -> argparse.Namespace:
     extract_parser.add_argument("--embedding-qf", type=int, default=DEFAULT_EMBEDDING_QF)
 
     compress_parser = subparsers.add_parser(
-        "compress", help="recompress watermarked image at one attack QF and extract"
+        "compress", help="recompress watermarked image at one recompress QF and extract"
     )
     compress_parser.add_argument("--watermarked", default=WATERMARKED_IMAGE_PATH)
     compress_parser.add_argument("--watermark", default=WATERMARK_IMAGE_PATH)
     compress_parser.add_argument("--embedding-qf", type=int, default=DEFAULT_EMBEDDING_QF)
-    compress_parser.add_argument("--attack-qf", type=int, default=DEFAULT_ATTACK_QF)
+    compress_parser.add_argument(
+        "--recompress-qf", type=int, default=DEFAULT_RECOMPRESS_QF
+    )
 
     return parser.parse_args()
 
@@ -622,11 +629,11 @@ def main() -> None:
                 embedding_qf=args.embedding_qf,
             )
         elif args.mode == "compress":
-            run_compress_attack(
+            run_compress_recompression(
                 watermarked_image_path=args.watermarked,
                 watermark_image_path=args.watermark,
                 embedding_qf=args.embedding_qf,
-                attack_qf=args.attack_qf,
+                recompress_qf=args.recompress_qf,
             )
     except FileNotFoundError as exc:
         print(exc)
