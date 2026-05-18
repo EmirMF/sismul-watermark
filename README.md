@@ -1,9 +1,9 @@
 # DCT JPEG Binary Watermarking
 
 Proyek ini berisi implementasi watermarking citra biner pada gambar JPEG-like
-menggunakan Discrete Cosine Transform (DCT). Watermark disisipkan pada koefisien
-DCT sebelum proses quantization, sehingga ketika Quality Factor (QF) rendah,
-watermark dapat rusak atau gagal diekstrak.
+menggunakan Discrete Cosine Transform (DCT). Watermark disisipkan dengan metode
+blind parity/QIM pada koefisien DCT, sehingga extraction cukup memakai
+`watermarked.jpg` dan ukuran watermark.
 
 ## Fitur
 
@@ -12,7 +12,7 @@ watermark dapat rusak atau gagal diekstrak.
 - Pemrosesan dilakukan per blok `8x8`, seperti pipeline JPEG.
 - Menggunakan level shifting, FDCT, quantization, dequantization, IDCT, dan inverse shifting.
 - Quantization matrix mengikuti standar JPEG luminance matrix dengan scaling berdasarkan QF.
-- Ekstraksi bersifat non-blind, sehingga membutuhkan gambar asli dan gambar watermarked.
+- Ekstraksi bersifat blind, sehingga gambar asli tidak dibutuhkan saat extraction.
 - Hanya menggunakan `numpy` dan `opencv-python`.
 
 ## Setup
@@ -109,7 +109,6 @@ Pengaturan utama ada di bagian bawah `dct_jpeg_watermark.py`:
 watermarker = DCTJPEGWatermarker(
     WatermarkConfig(
         quality_factor=71,
-        alpha=20.0,
         coefficient=(4, 4),
         use_y_channel=True,
     )
@@ -119,7 +118,6 @@ watermarker = DCTJPEGWatermarker(
 Parameter:
 
 - `quality_factor`: kualitas simulasi JPEG, rentang `1..100`.
-- `alpha`: kekuatan penyisipan watermark pada koefisien DCT.
 - `coefficient`: posisi koefisien DCT yang dipakai untuk embedding.
 - `use_y_channel`: jika `True`, watermark ditanam pada channel luminance `Y`.
 
@@ -132,42 +130,43 @@ Parameter:
 5. Bagi host image menjadi blok non-overlap `8x8`.
 6. Lakukan level shifting dengan mengurangi pixel sebesar `128`.
 7. Terapkan Forward DCT pada setiap blok.
-8. Sisipkan bit watermark pada koefisien mid-frequency, default `(4,4)`.
+8. Sisipkan bit watermark pada parity indeks kuantisasi koefisien `(4,4)`.
 9. Lakukan quantization menggunakan matrix JPEG luminance sesuai QF.
 10. Lakukan dequantization, IDCT, inverse shifting, dan clipping ke `0..255`.
 11. Simpan hasil sebagai `watermarked.jpg`.
 
 ## Alur Extraction
 
-Ekstraksi membutuhkan dua gambar:
+Ekstraksi hanya membutuhkan gambar watermarked dan ukuran watermark:
 
 ```text
-input.jpg        Gambar asli
 watermarked.jpg  Gambar hasil embedding
+watermark_shape   Ukuran watermark, misalnya (32, 32)
 ```
 
 Langkah ekstraksi:
 
-1. Ambil channel `Y` dari kedua gambar.
-2. Bagi keduanya menjadi blok `8x8`.
-3. Lakukan level shifting, DCT, dan quantization pada kedua gambar.
-4. Bandingkan koefisien `(4,4)` antara blok asli dan blok watermarked.
-5. Jika selisih positif, bit dibaca sebagai `1`.
-6. Jika selisih nol atau negatif, bit dibaca sebagai `0`.
+1. Ambil channel `Y` dari `watermarked.jpg`.
+2. Bagi gambar menjadi blok `8x8`.
+3. Lakukan level shifting, DCT, dan quantization.
+4. Ambil indeks koefisien terkuantisasi pada posisi `(4,4)`.
+5. Jika indeks genap, bit dibaca sebagai `0`.
+6. Jika indeks ganjil, bit dibaca sebagai `1`.
 7. Susun bit kembali menjadi citra watermark.
 8. Simpan hasil sebagai `extracted_watermark.png`.
 
 ## Mengapa QF Rendah Merusak Watermark
 
-Watermark disisipkan sebelum quantization:
+Watermark disisipkan sebagai parity indeks kuantisasi:
 
 ```text
-DCT -> embed watermark -> quantization -> dequantization -> IDCT
+DCT -> paksa parity indeks koefisien -> quantization -> dequantization -> IDCT
 ```
 
-Pada QF rendah, nilai quantization matrix menjadi besar. Akibatnya perubahan
-kecil dari watermark, yaitu `+alpha` atau `-alpha`, dapat hilang saat koefisien
-DCT dibagi lalu dibulatkan.
+Pada QF rendah, nilai quantization matrix menjadi besar dan JPEG compression
+menjadi lebih kasar. Perubahan pada koefisien mid-frequency lebih mudah
+terganggu oleh rounding, clipping, dan recompression JPEG, sehingga parity yang
+dibaca saat extraction dapat berubah.
 
 Itulah sebabnya:
 
@@ -176,9 +175,10 @@ QF tinggi  -> watermark lebih mudah diekstrak
 QF rendah  -> watermark lebih noisy atau gagal diekstrak
 ```
 
-Jika watermark terlalu sulit terbaca, naikkan `alpha` atau gunakan QF lebih
-tinggi. Jika watermark terlalu mudah terbaca pada QF rendah, turunkan `alpha`
-atau pilih koefisien dengan frekuensi lebih tinggi, misalnya `(5,5)`.
+Jika watermark terlalu sulit terbaca, gunakan QF lebih tinggi atau pilih
+koefisien yang sedikit lebih rendah frekuensinya. Jika watermark terlalu mudah
+terbaca pada QF rendah, pilih koefisien dengan frekuensi lebih tinggi, misalnya
+`(5,5)`.
 
 ## Catatan DCT
 

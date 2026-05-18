@@ -1,15 +1,13 @@
 """
-Binary-image watermarking in the DCT domain with JPEG-like quantization.
+Blind binary-image watermarking in the DCT domain with JPEG-like quantization.
 
-This version embeds the watermark BEFORE quantization:
+This version embeds the watermark using parity/QIM on one DCT coefficient:
 
-    block -> level shift -> FDCT -> watermark coefficient edit -> quantization
+    block -> level shift -> FDCT -> parity coefficient edit -> quantization
     -> dequantization -> IDCT -> inverse level shift
 
-That ordering is important. If the quality factor (QF) is low, JPEG
-quantization becomes coarse and can round away the watermark perturbation, so
-the extracted watermark may become noisy or unreadable. This matches the
-behavior requested for a fragile/quality-sensitive DCT watermark.
+Extraction is blind: it only needs the watermarked image and the watermark
+shape. The original host image is not required.
 
 Only numpy and OpenCV are used.
 """
@@ -28,7 +26,6 @@ class WatermarkConfig:
     """Configuration for DCT-domain binary image watermarking."""
 
     quality_factor: int = 90
-    alpha: float = 20.0
     coefficient: Tuple[int, int] = (4, 4)
     use_y_channel: bool = True
 
@@ -75,9 +72,6 @@ class DCTJPEGWatermarker:
                 "Do not embed in coefficient (0, 0); the DC term controls block brightness."
             )
 
-        if self.config.alpha <= 0:
-            raise ValueError("alpha must be positive.")
-
     @classmethod
     def generate_luminance_quantization_matrix(cls, quality_factor: int) -> np.ndarray:
         """
@@ -88,8 +82,7 @@ class DCTJPEGWatermarker:
         - QF >= 50 -> scale = 200 - 2*QF, so quality 100 approaches no loss.
 
         Quantization divides each DCT coefficient by this matrix and rounds the
-        result. Larger matrix values mean a larger coefficient perturbation is
-        required to survive. Therefore, low QF can destroy this watermark.
+        result. Larger matrix values mean coarser bins and stronger loss.
         """
         if not 1 <= quality_factor <= 100:
             raise ValueError("quality_factor must be in the range 1..100.")
@@ -199,12 +192,60 @@ class DCTJPEGWatermarker:
         """Quantize DCT coefficients using the configured JPEG luminance matrix."""
         return np.round(dct_block / self.quantization_matrix)
 
+    @staticmethod
+    def _parity(value: int) -> int:
+        """Return parity for positive or negative integers as 0/even or 1/odd."""
+        return abs(value) % 2
+
+    @staticmethod
+    def _nearest_index_with_parity(current_index: int, target_bit: int) -> int:
+        """
+        Find the nearest quantized index whose parity represents target_bit.
+
+        Blind embedding uses QIM/parity:
+        - even quantized coefficient index -> bit 0
+        - odd quantized coefficient index  -> bit 1
+
+        If the current index already has the desired parity, it is kept. If not,
+        the index is moved to the nearest neighboring bin. This makes extraction
+        possible from the watermarked image alone because the bit is encoded in
+        the coefficient itself, not in a difference from the original image.
+        """
+        if DCTJPEGWatermarker._parity(current_index) == target_bit:
+            return current_index
+
+        plus = current_index + 1
+        minus = current_index - 1
+
+        if abs(plus) <= abs(minus):
+            return plus
+        return minus
+
+    def _embed_bit_by_parity(
+        self, dct_block: np.ndarray, bit: int, coefficient: Tuple[int, int]
+    ) -> np.ndarray:
+        """
+        Embed one bit by forcing the JPEG-quantized index parity at coefficient.
+
+        The edited value is placed at the center of the desired JPEG quantization
+        bin. After the following quantization step, the selected coefficient
+        should round to an even index for bit 0 or an odd index for bit 1.
+        """
+        u, v = coefficient
+        quant_step = self.quantization_matrix[u, v]
+        current_index = int(np.round(dct_block[u, v] / quant_step))
+        target_index = self._nearest_index_with_parity(current_index, int(bit))
+
+        edited = dct_block.copy()
+        edited[u, v] = target_index * quant_step
+        return edited
+
     def _jpeg_reconstruct(self, dct_block: np.ndarray) -> np.ndarray:
         """
         Simulate JPEG quantization and decoding for one DCT block.
 
-        Because the watermark is inserted before this function is called, a low
-        QF can remove the additive watermark during rounding.
+        The edited coefficient is quantized and dequantized before IDCT to
+        simulate the relevant lossy JPEG stage.
         """
         quantized = self._quantize(dct_block)
         dequantized = quantized * self.quantization_matrix
@@ -217,10 +258,12 @@ class DCTJPEGWatermarker:
         """
         Embed a binary image watermark into the host image.
 
-        Coefficient (4,4) is a mid-frequency position. It is less visually
-        obvious than low frequencies, but more likely to survive than very high
-        frequencies. Since embedding happens BEFORE quantization, survival still
-        depends strongly on QF and alpha.
+        Coefficient (4,4) is a mid-frequency position. The bit is stored as
+        parity of the JPEG-quantized coefficient index:
+        - even index -> bit 0
+        - odd index  -> bit 1
+
+        This makes extraction blind because the original image is not needed.
         """
         luminance, chroma = self._prepare_luminance(host_image)
         watermark = self._prepare_binary_watermark(watermark_image)
@@ -238,11 +281,9 @@ class DCTJPEGWatermarker:
                 dct_block = self._fdct(block)
 
                 if bit_index < total_bits:
-                    # Binary watermark mapping: white pixel/1 -> +alpha,
-                    # black pixel/0 -> -alpha. This perturbation is still
-                    # vulnerable to the following quantization step.
-                    signal = 1.0 if watermark_bits[bit_index] == 1 else -1.0
-                    dct_block[u, v] += self.config.alpha * signal
+                    dct_block = self._embed_bit_by_parity(
+                        dct_block, int(watermark_bits[bit_index]), (u, v)
+                    )
                     bit_index += 1
 
                 watermarked_y[row : row + 8, col : col + 8] = self._jpeg_reconstruct(
@@ -253,42 +294,32 @@ class DCTJPEGWatermarker:
 
     def extract_binary_watermark(
         self,
-        original_image: np.ndarray,
         watermarked_image: np.ndarray,
         watermark_shape: Tuple[int, int],
     ) -> np.ndarray:
         """
-        Extract a binary watermark image using non-blind extraction.
+        Extract a binary watermark image using blind extraction.
 
-        The original and watermarked images are both transformed and quantized.
-        If the quantized mid-frequency coefficient increased, the bit is read as
-        1; otherwise it is read as 0. Low QF can make many differences collapse
-        to zero or flip, producing a damaged watermark.
+        Only the watermarked image is transformed and quantized. The bit is read
+        from the parity of the selected quantized DCT coefficient:
+        - even coefficient index -> bit 0
+        - odd coefficient index  -> bit 1
         """
-        original_y, _ = self._prepare_luminance(original_image)
         watermarked_y, _ = self._prepare_luminance(watermarked_image)
-
-        min_height = min(original_y.shape[0], watermarked_y.shape[0])
-        min_width = min(original_y.shape[1], watermarked_y.shape[1])
-        original_y = original_y[:min_height, :min_width]
-        watermarked_y = watermarked_y[:min_height, :min_width]
-
-        self._validate_watermark_capacity(original_y.shape, watermark_shape)
+        self._validate_watermark_capacity(watermarked_y.shape, watermark_shape)
 
         required_bits = watermark_shape[0] * watermark_shape[1]
         extracted_bits: list[int] = []
         u, v = self.config.coefficient
 
-        for row in range(0, original_y.shape[0], 8):
-            for col in range(0, original_y.shape[1], 8):
-                original_block = original_y[row : row + 8, col : col + 8]
+        for row in range(0, watermarked_y.shape[0], 8):
+            for col in range(0, watermarked_y.shape[1], 8):
                 watermarked_block = watermarked_y[row : row + 8, col : col + 8]
 
-                original_q = self._quantize(self._fdct(original_block))
                 watermarked_q = self._quantize(self._fdct(watermarked_block))
-                difference = watermarked_q[u, v] - original_q[u, v]
+                coefficient_index = int(watermarked_q[u, v])
 
-                extracted_bits.append(1 if difference > 0 else 0)
+                extracted_bits.append(self._parity(coefficient_index))
                 if len(extracted_bits) == required_bits:
                     extracted = np.array(extracted_bits, dtype=np.uint8)
                     return (extracted.reshape(watermark_shape) * 255).astype(np.uint8)
@@ -308,29 +339,28 @@ class DCTJPEGWatermarker:
             raise FileNotFoundError(f"Could not read watermark image: {watermark_path}")
 
         watermarked = self.embed_binary_watermark(host, watermark)
-        if not cv2.imwrite(output_path, watermarked):
+        write_params = []
+        if output_path.lower().endswith((".jpg", ".jpeg")):
+            write_params = [cv2.IMWRITE_JPEG_QUALITY, self.config.quality_factor]
+
+        if not cv2.imwrite(output_path, watermarked, write_params):
             raise IOError(f"Could not write watermarked image: {output_path}")
 
         return watermarked
 
     def extract_file(
         self,
-        original_path: str,
         watermarked_path: str,
         watermark_shape: Tuple[int, int],
         output_path: str,
     ) -> np.ndarray:
-        """Extract a binary watermark from files and save it as a visible image."""
-        original = cv2.imread(original_path, cv2.IMREAD_COLOR)
-        if original is None:
-            raise FileNotFoundError(f"Could not read original image: {original_path}")
-
+        """Extract a binary watermark from one watermarked file and save it."""
         watermarked = cv2.imread(watermarked_path, cv2.IMREAD_COLOR)
         if watermarked is None:
             raise FileNotFoundError(f"Could not read watermarked image: {watermarked_path}")
 
         extracted = self.extract_binary_watermark(
-            original, watermarked, watermark_shape=watermark_shape
+            watermarked, watermark_shape=watermark_shape
         )
         if not cv2.imwrite(output_path, extracted):
             raise IOError(f"Could not write extracted watermark image: {output_path}")
@@ -346,12 +376,11 @@ if __name__ == "__main__":
     # 3. Set watermark_shape to the watermark image size, e.g. (32, 32).
     # 4. Run: python dct_jpeg_watermark.py
     #
-    # Try quality_factor=90 first. Then lower it to 10 or 1: because embedding is
-    # done before quantization, the extracted watermark should become much noisier.
+    # Extraction is blind: after embedding, only watermarked.jpg and the watermark
+    # shape are needed. The original input.jpg is not used by extract_file().
     watermarker = DCTJPEGWatermarker(
         WatermarkConfig(
             quality_factor=71,
-            alpha=20.0,
             coefficient=(4, 4),
             use_y_channel=True,
         )
@@ -371,7 +400,6 @@ if __name__ == "__main__":
             host_image_path, watermark_image_path, watermarked_image_path
         )
         watermarker.extract_file(
-            host_image_path,
             watermarked_image_path,
             watermark_shape=watermark_for_shape.shape,
             output_path=extracted_watermark_path,
