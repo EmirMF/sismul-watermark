@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Tuple
 
 import cv2
@@ -24,12 +25,20 @@ import numpy as np
 
 HOST_IMAGE_PATH = "input.jpg"
 WATERMARK_IMAGE_PATH = "watermark.png"
-WATERMARKED_IMAGE_PATH = "watermarked.jpg"
-EXTRACTED_WATERMARK_PATH = "extracted_watermark.png"
+OUTPUT_DIR = "img_output"
+WATERMARKED_IMAGE_PATH = f"{OUTPUT_DIR}/watermarked.jpg"
+EXTRACTED_WATERMARK_PATH = f"{OUTPUT_DIR}/extracted_watermark.png"
 
 DEFAULT_EMBEDDING_QF = 90
 DEFAULT_RECOMPRESS_QF = 30
 DEFAULT_COEFFICIENT = (4, 4)
+
+
+def ensure_parent_dir(output_path: str) -> None:
+    """Create the output parent directory if the path has one."""
+    parent = Path(output_path).parent
+    if parent != Path("."):
+        parent.mkdir(parents=True, exist_ok=True)
 
 
 @dataclass(frozen=True)
@@ -354,6 +363,7 @@ class DCTJPEGWatermarker:
         if output_path.lower().endswith((".jpg", ".jpeg")):
             write_params = [cv2.IMWRITE_JPEG_QUALITY, self.config.quality_factor]
 
+        ensure_parent_dir(output_path)
         if not cv2.imwrite(output_path, watermarked, write_params):
             raise IOError(f"Could not write watermarked image: {output_path}")
 
@@ -373,6 +383,7 @@ class DCTJPEGWatermarker:
         extracted = self.extract_binary_watermark(
             watermarked, watermark_shape=watermark_shape
         )
+        ensure_parent_dir(output_path)
         if not cv2.imwrite(output_path, extracted):
             raise IOError(f"Could not write extracted watermark image: {output_path}")
 
@@ -392,6 +403,7 @@ class DCTJPEGWatermarker:
             raise FileNotFoundError(f"Could not read image to recompress: {input_path}")
 
         recompressed = self.jpeg_recompress_image(image, recompress_qf)
+        ensure_parent_dir(output_path)
         if not cv2.imwrite(
             output_path,
             recompressed,
@@ -492,8 +504,8 @@ def load_watermark_for_shape(watermark_image_path: str) -> np.ndarray:
 def recompressed_output_paths(recompress_qf: int) -> tuple[str, str]:
     """Return filenames for a manually chosen recompression QF."""
     return (
-        f"watermarked_recompress_qf{recompress_qf}.jpg",
-        f"extracted_watermark_recompress_qf{recompress_qf}.png",
+        f"{OUTPUT_DIR}/watermarked_recompress_qf{recompress_qf}.jpg",
+        f"{OUTPUT_DIR}/extracted_watermark_recompress_qf{recompress_qf}.png",
     )
 
 
@@ -518,7 +530,7 @@ def run_compress_recompression(
     embedding_qf: int = DEFAULT_EMBEDDING_QF,
     recompress_qf: int = DEFAULT_RECOMPRESS_QF,
 ) -> None:
-    """Recompress watermarked.jpg at one recompress QF, then extract the watermark."""
+    """Recompress the default watermarked output, then extract the watermark."""
     watermarker = create_watermarker(embedding_qf)
     watermark = load_watermark_for_shape(watermark_image_path)
     recompressed_watermarked_path, recompressed_extracted_watermark_path = (
@@ -533,6 +545,7 @@ def run_compress_recompression(
     )
     accuracy = watermarker.binary_watermark_accuracy(watermark, recompressed_extracted)
 
+    ensure_parent_dir(recompressed_extracted_watermark_path)
     if not cv2.imwrite(recompressed_extracted_watermark_path, recompressed_extracted):
         raise IOError(
             f"Could not write recompressed extracted watermark: "

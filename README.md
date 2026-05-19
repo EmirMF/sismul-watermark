@@ -46,7 +46,7 @@ python dct_jpeg_watermark.py embed
 Output:
 
 ```text
-watermarked.jpg
+img_output/watermarked.jpg
 ```
 
 Extraction:
@@ -58,7 +58,7 @@ python dct_jpeg_watermark.py extract
 Output:
 
 ```text
-extracted_watermark.png
+img_output/extracted_watermark.png
 ```
 
 Recompression test:
@@ -70,8 +70,52 @@ python dct_jpeg_watermark.py compress --recompress-qf 30
 Output:
 
 ```text
-watermarked_recompress_qf30.jpg
-extracted_watermark_recompress_qf30.png
+img_output/watermarked_recompress_qf30.jpg
+img_output/extracted_watermark_recompress_qf30.png
+```
+
+## CLI Usage
+
+```bash
+python dct_jpeg_watermark.py <mode> [options]
+```
+
+Mode yang tersedia:
+
+```text
+embed      menyisipkan watermark ke input image
+extract    mengekstrak watermark dari watermarked image
+compress   recompress watermarked image lalu ekstrak watermark
+```
+
+Opsi `embed`:
+
+```bash
+python dct_jpeg_watermark.py embed \
+  --host input.jpg \
+  --watermark watermark.png \
+  --output img_output/watermarked.jpg \
+  --embedding-qf 90
+```
+
+Opsi `extract`:
+
+```bash
+python dct_jpeg_watermark.py extract \
+  --watermarked img_output/watermarked.jpg \
+  --watermark watermark.png \
+  --output img_output/extracted_watermark.png \
+  --embedding-qf 90
+```
+
+Opsi `compress`:
+
+```bash
+python dct_jpeg_watermark.py compress \
+  --watermarked img_output/watermarked.jpg \
+  --watermark watermark.png \
+  --embedding-qf 90 \
+  --recompress-qf 30
 ```
 
 ## Parameter
@@ -102,4 +146,4 @@ membaca parity koefisien.
 - Setiap blok di-level shift, lalu masuk DCT.
 - Satu bit watermark ditanam pada parity indeks kuantisasi koefisien `(4, 4)`.
 - Blok dikembalikan dengan dequantization, IDCT, inverse shift, lalu disimpan.
-- Extraction membaca parity koefisien yang sama dari `watermarked.jpg`.
+- Extraction membaca parity koefisien yang sama dari `img_output/watermarked.jpg`.
