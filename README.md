@@ -1,5 +1,7 @@
 # DCT JPEG Binary Watermarking
 
+[Dokumen laporan Watermarking](Watermarking_SistemMultimedia_18224066.pdf)
+
 Implementasi watermarking citra biner pada domain DCT dengan quantization
 bergaya JPEG. Watermark ditanam pada parity koefisien DCT `(4, 4)` di channel
 Y/luminance, sehingga proses ekstraksi bersifat blind dan tidak membutuhkan
